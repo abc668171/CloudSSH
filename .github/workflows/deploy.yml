@@ -1,6 +1,7 @@
 name: Deploy to Cloudflare Workers
 
 on:
+  workflow_dispatch:   # 新增，支持手动点击运行
   push:
     branches: [test, main]
     paths-ignore:
@@ -16,7 +17,7 @@ on:
 
 jobs:
   deploy:
-    if: github.repository_owner == 'newbietan'
+# 删除原作者判断：if: github.repository_owner == 'newbietan'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
