@@ -14,6 +14,9 @@ import { notify } from './ui-feedback';
 import { initI18n, onLocaleChange, t } from './i18n';
 import { MobileTerminalController } from './mobile-terminal';
 
+// 关键：加载AI‑Agent面板副作用模块，缺失会导致AI按钮无逻辑
+import "./agent/agent-panel";
+
 // ==================== 全局状态 ====================
 
 let tabManager: TabManager | null = null;
@@ -169,7 +172,7 @@ function showUserSpace(user: { id: number; github_id: number; username: string; 
   document.getElementById('user-space-section')!.classList.remove('hidden');
   document.getElementById('user-space-section')!.classList.add('flex');
 
-  // Show agent toggle button for logged-in users
+  // Show agent toggle button for logged‑in users
   document.getElementById('agent-toggle-btn')?.classList.remove('hidden');
 
   serverList = new ServerList(
@@ -190,12 +193,11 @@ function showUserSpace(user: { id: number; github_id: number; username: string; 
   );
 }
 
-/** 显示连接页面（匿名 → auth-form，登录 → 服务器列表） */
+/** 显示连接页面（匿名 → auth‑form，登录 → 服务器列表） */
 function showConnectionPage(): void {
   tabManager?.getActiveTab()?.agentPanel?.rejectPendingConfirmation(false);
 
   // 如果还有活跃标签，不需要隐藏终端区域；只需要覆盖显示连接页面
-  // 但为了简单起见，我们先切回对应的入口页面
   if (isLoggedIn) {
     deactivateTerminalView();
     document.getElementById('user-space-section')!.classList.remove('hidden');
@@ -269,7 +271,7 @@ function showTerminalFromServer(
 
   terminal.mount();
 
-  // 通过 wsUrl（含 one-time-token）建立连接
+  // 通过 wsUrl（含 one‑time‑token）建立连接
   const ws = new WebSocket(wsUrl);
   ws.binaryType = 'arraybuffer';
   const serverId = hostInfo?.serverId;
@@ -493,7 +495,7 @@ async function saveThemeToCloud(theme: ReturnType<typeof normalizeImportedTheme>
   try {
     const response = await fetch('/api/user/theme', {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content‑Type': 'application/json' },
       body: JSON.stringify({ theme_data: theme }),
     });
     return response.ok;
@@ -581,7 +583,7 @@ async function init(): Promise<void> {
   showAuthSection();
 }
 
-// 导出供 auth-form 和 server-list 使用
+// 导出供 auth‑form 和 server‑list 使用
 export { getTabManager, showTerminalWithNewTab, validateWsUrl };
 
 init();
