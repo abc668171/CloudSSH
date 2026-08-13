@@ -1,6 +1,8 @@
 import { t, type TranslationKey, type TranslationParams } from './i18n';
 
 const SSH_EVENT_KEYS: Record<string, TranslationKey> = {
+  jump_hop_connecting: 'terminal.status.jumpHopConnecting',
+  jump_target_connecting: 'terminal.status.jumpTargetConnecting',
   version_exchange: 'terminal.status.versionExchange',
   version_ready: 'terminal.status.versionReady',
   auth_public_key: 'terminal.status.authPublicKey',
@@ -27,11 +29,14 @@ const SSH_EVENT_KEYS: Record<string, TranslationKey> = {
   algorithm_error: 'terminal.status.algorithmError',
   service_error: 'terminal.status.serviceError',
   host_key_accepted: 'terminal.status.hostKeyAccepted',
+  host_key_fingerprint_matched_unverified: 'terminal.status.hostKeyFingerprintMatchedUnverified',
   host_key_first_seen: 'terminal.status.hostKeyFirstSeen',
+  host_key_not_saved: 'terminal.status.hostKeyNotSaved',
   host_key_changed: 'terminal.status.hostKeyChanged',
   host_key_known: 'terminal.status.hostKeyKnown',
   host_key_actual: 'terminal.status.hostKeyActual',
   host_key_trust_instruction: 'terminal.status.hostKeyTrustInstruction',
+  host_key_unverified_instruction: 'terminal.status.hostKeyUnverifiedInstruction',
   host_key_unsupported: 'terminal.status.hostKeyUnsupported',
   host_key_verify_skipped: 'terminal.status.hostKeyVerifySkipped',
   host_key_signature_blocked: 'terminal.status.hostKeySignatureBlocked',

@@ -7,7 +7,13 @@ import { TrzszFilter } from 'trzsz';
 import '@xterm/xterm/css/xterm.css';
 import { copyTextToClipboard } from './clipboard';
 import { t } from './i18n';
-import { notify } from './ui-feedback';
+import { confirmAction, notify } from './ui-feedback';
+import {
+  normalizeChangedHostKeyMessage,
+  normalizeVerifiedHostKeyMessage,
+  saveKnownFingerprint,
+  type ChangedHostKeyMessage,
+} from './known-hosts';
 import {
   AuthChallengeDialog,
   type AuthChallengeSubmission,
@@ -94,6 +100,12 @@ interface MobileScrollGesture {
 
 const MOBILE_SCROLL_START_THRESHOLD_PX = 10;
 const MOBILE_VIEWPORT_QUERY = '(max-width: 767px), (max-width: 1180px) and (pointer: coarse)';
+const MOBILE_CONNECTION_RECOVERY_QUERY = '(pointer: coarse)';
+
+function supportsMobileConnectionRecovery(): boolean {
+  return navigator.maxTouchPoints > 0
+    && (window.matchMedia?.(MOBILE_CONNECTION_RECOVERY_QUERY).matches ?? false);
+}
 
 export class SSHTerminal {
   private terminal: Terminal;
@@ -146,6 +158,8 @@ export class SSHTerminal {
   private imePendingHandled = false;
   private imeKeyupTimer: ReturnType<typeof setTimeout> | null = null;
   private viewportRestoreFrame: number | null = null;
+  private readonly mobileConnectionRecoveryEnabled: boolean;
+  private pendingHostKeyChangeSocket: WebSocket | null = null;
   private readonly contextMenuPasteListener = async (event: MouseEvent): Promise<void> => {
     if (window.matchMedia?.('(pointer: coarse)').matches) return;
     event.preventDefault();
@@ -239,6 +253,9 @@ export class SSHTerminal {
 
   constructor(containerId: string) {
     this.container = document.getElementById(containerId)!;
+    // 桌面浏览器切换标签页也会触发 visibilitychange，但通常不会挂起网络栈。
+    // 仅在手机/平板这类以触摸为主的环境监听后台恢复，避免无意义的探测和日志。
+    this.mobileConnectionRecoveryEnabled = supportsMobileConnectionRecovery();
     this.resizeListener = () => {
       // visualViewport 的连续变化由 MobileTerminalController 稳定后统一处理，
       // 桌面端和不支持 visualViewport 的浏览器仍保留直接适配。
@@ -291,8 +308,10 @@ export class SSHTerminal {
     });
 
     window.addEventListener('resize', this.resizeListener);
-    document.addEventListener('visibilitychange', this.visibilityChangeListener);
-    window.addEventListener('pageshow', this.pageShowListener);
+    if (this.mobileConnectionRecoveryEnabled) {
+      document.addEventListener('visibilitychange', this.visibilityChangeListener);
+      window.addEventListener('pageshow', this.pageShowListener);
+    }
     window.addEventListener('online', this.onlineListener);
 
     // 右键粘贴（选区已通过鼠标松手自动复制到剪贴板）
@@ -687,28 +706,110 @@ export class SSHTerminal {
 
   // ==================== known_hosts (TOFU) ====================
 
-  private handleHostKey(fingerprint: string): void {
-    if (!this.lastConfig) return;
-    const key = `${this.lastConfig.host}:${this.lastConfig.port}`;
-
-    // 存储到 localStorage（匿名用户）
+  private async handleVerifiedHostKey(message: unknown): Promise<void> {
+    const hostKey = normalizeVerifiedHostKeyMessage(message);
+    if (!hostKey) return;
+    const requireCloud = Boolean(this.lastHostInfo?.serverId);
     try {
-      const raw = localStorage.getItem('cloudssh_known_hosts');
-      const map = raw ? JSON.parse(raw) : {};
-      map[key] = fingerprint;
-      localStorage.setItem('cloudssh_known_hosts', JSON.stringify(map));
-    } catch { /* ignore */ }
+      await saveKnownFingerprint(
+        hostKey.host,
+        hostKey.port,
+        hostKey.fingerprint,
+        requireCloud,
+      );
+    } catch {
+      notify(t('terminal.hostKeySaveFailed'), {
+        title: t('terminal.hostKeySaveTitle'),
+        variant: 'danger',
+      });
+    }
+  }
 
-    // 尝试存储到云端（登录用户）
-    fetch('/api/known-hosts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        host: this.lastConfig.host,
-        port: this.lastConfig.port,
-        fingerprint,
-      }),
-    }).catch(() => { /* 未登录或网络错误，忽略 */ });
+  private async handleChangedHostKey(socket: WebSocket, message: unknown): Promise<void> {
+    const hostKey = normalizeChangedHostKeyMessage(message);
+    if (!hostKey || this.pendingHostKeyChangeSocket) return;
+
+    this.canReconnect = false;
+    this.clearReconnectTimeout();
+    this.pendingHostKeyChangeSocket = socket;
+    try {
+      const trusted = await confirmAction({
+        title: t('terminal.hostKeyChangeTitle'),
+        message: t('terminal.hostKeyChangeMessage', {
+          host: hostKey.displayHost,
+          port: hostKey.port,
+          known: hostKey.expectedFingerprint,
+          actual: hostKey.fingerprint,
+          keyType: hostKey.keyType,
+        }),
+        confirmText: t('terminal.hostKeyTrustAndReconnect'),
+        cancelText: t('terminal.hostKeyCancel'),
+        variant: 'danger',
+      });
+      if (!trusted || socket !== this.ws) return;
+
+      const requireCloud = Boolean(this.lastHostInfo?.serverId);
+      try {
+        await saveKnownFingerprint(
+          hostKey.host,
+          hostKey.port,
+          hostKey.fingerprint,
+          requireCloud,
+        );
+      } catch {
+        notify(t('terminal.hostKeyTrustFailed'), {
+          title: t('terminal.hostKeyChangeTitle'),
+          variant: 'danger',
+        });
+        return;
+      }
+
+      try {
+        await this.reconnectAfterHostKeyTrust(hostKey);
+      } catch {
+        notify(t('terminal.hostKeyReconnectFailed'), {
+          title: t('terminal.hostKeyChangeTitle'),
+          variant: 'danger',
+        });
+      }
+    } finally {
+      if (this.pendingHostKeyChangeSocket === socket) {
+        this.pendingHostKeyChangeSocket = null;
+      }
+    }
+  }
+
+  private async reconnectAfterHostKeyTrust(hostKey: ChangedHostKeyMessage): Promise<void> {
+    this.reconnectAttempts = 0;
+    if (this.lastConfig) {
+      const config = { ...this.lastConfig, expectedFingerprint: hostKey.fingerprint };
+      this.terminal.writeln(`\x1b[32m[+] ${t('terminal.reconnecting')}\x1b[0m`);
+      await this.connect(config, { resetDisplay: false });
+      return;
+    }
+
+    const reconnectFactory = this.reconnectWebSocketFactory;
+    if (reconnectFactory) {
+      this.terminal.writeln(`\x1b[32m[+] ${t('terminal.reconnecting')}\x1b[0m`);
+      const socket = await reconnectFactory();
+      if (
+        this.reconnectWebSocketFactory !== reconnectFactory
+        || this.ws !== this.pendingHostKeyChangeSocket
+      ) {
+        socket.close(1000);
+        return;
+      }
+      this.connectWithWebSocket(socket, this.lastHostInfo ?? undefined, {
+        resetDisplay: false,
+        reconnectFactory,
+      });
+      return;
+    }
+
+    notify(t('terminal.hostKeyTrustedReconnectManually'), {
+      title: t('terminal.hostKeyChangeTitle'),
+      variant: 'warning',
+    });
   }
 
   async connect(config: SSHConnectionConfig, options: ConnectOptions = {}): Promise<void> {
@@ -877,8 +978,16 @@ export class SSHTerminal {
             case 'debug':
               this.terminal.writeln(`\x1b[90m[DEBUG] ${msg.message}\x1b[0m`);
               break;
-            case 'host_key':
-              this.handleHostKey(msg.fingerprint);
+            case 'host_key_verified':
+              void this.handleVerifiedHostKey(msg);
+              break;
+            case 'host_key_changed':
+              void this.handleChangedHostKey(socket, msg).catch(() => {
+                notify(t('terminal.hostKeyTrustFailed'), {
+                  title: t('terminal.hostKeyChangeTitle'),
+                  variant: 'danger',
+                });
+              });
               break;
             case 'pong':
               this.handleHeartbeatResponse(msg);
@@ -959,10 +1068,20 @@ export class SSHTerminal {
   private handleAuthChallenge(socket: WebSocket, payload: unknown): void {
     if (socket !== this.ws) return;
 
+    const challengeTarget = typeof payload === 'object' && payload !== null
+      ? payload as { host?: unknown; port?: unknown }
+      : {};
+    const challengeHost = typeof challengeTarget.host === 'string'
+      ? challengeTarget.host
+      : this.lastConfig?.host ?? '';
+    const challengePort = typeof challengeTarget.port === 'number' && Number.isInteger(challengeTarget.port)
+      ? challengeTarget.port
+      : this.lastConfig?.port ?? 22;
+
     this.authChallengeDialog ??= new AuthChallengeDialog();
     const shown = this.authChallengeDialog.show(payload, {
-      host: this.lastConfig?.host ?? '',
-      port: this.lastConfig?.port ?? 22,
+      host: challengeHost,
+      port: challengePort,
       onShown: (id: string) => {
         if (socket !== this.ws || socket.readyState !== WebSocket.OPEN) return;
         socket.send(JSON.stringify({ type: 'auth_challenge_ack', id }));
@@ -1351,8 +1470,10 @@ export class SSHTerminal {
     this.authChallengeDialog?.destroy();
     this.authChallengeDialog = null;
     window.removeEventListener('resize', this.resizeListener);
-    document.removeEventListener('visibilitychange', this.visibilityChangeListener);
-    window.removeEventListener('pageshow', this.pageShowListener);
+    if (this.mobileConnectionRecoveryEnabled) {
+      document.removeEventListener('visibilitychange', this.visibilityChangeListener);
+      window.removeEventListener('pageshow', this.pageShowListener);
+    }
     window.removeEventListener('online', this.onlineListener);
     this.container.removeEventListener('pointerdown', this.selectionPointerDownListener, true);
     this.container.removeEventListener('pointermove', this.selectionPointerMoveListener, true);
@@ -1402,56 +1523,4 @@ export class SSHTerminal {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }
-}
-
-// ==================== known_hosts 辅助函数 ====================
-
-/**
- * 加载已知主机指纹（TOFU 验证用）
- * 优先从云端（登录用户）加载，回退到 localStorage（匿名用户）
- */
-export async function loadKnownFingerprint(host: string, port: number): Promise<string | null> {
-  // 先尝试云端（登录用户）
-  try {
-    const res = await fetch(`/api/known-hosts?host=${encodeURIComponent(host)}&port=${port}`);
-    if (res.ok) {
-      const data = await res.json() as { fingerprint: string | null };
-      if (data.fingerprint) return data.fingerprint;
-    }
-  } catch { /* 未登录或网络错误 */ }
-
-  // 回退到 localStorage
-  try {
-    const raw = localStorage.getItem('cloudssh_known_hosts');
-    if (raw) {
-      const map = JSON.parse(raw) as Record<string, string>;
-      return map[`${host}:${port}`] || null;
-    }
-  } catch { /* ignore */ }
-
-  return null;
-}
-
-/**
- * 清除已知主机指纹（用于主机密钥变更后重新信任）
- */
-export async function clearKnownFingerprint(host: string, port: number): Promise<void> {
-  // 清除 localStorage
-  try {
-    const raw = localStorage.getItem('cloudssh_known_hosts');
-    if (raw) {
-      const map = JSON.parse(raw) as Record<string, string>;
-      delete map[`${host}:${port}`];
-      localStorage.setItem('cloudssh_known_hosts', JSON.stringify(map));
-    }
-  } catch { /* ignore */ }
-
-  // 清除云端
-  try {
-    await fetch('/api/known-hosts', {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host, port }),
-    });
-  } catch { /* 未登录或网络错误 */ }
 }
