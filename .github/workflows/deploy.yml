@@ -1,7 +1,7 @@
 name: Deploy to Cloudflare Workers
 
 on:
-  workflow_dispatch:   # 新增，支持手动点击运行
+  workflow_dispatch:
   push:
     branches: [test, main]
     paths-ignore:
@@ -16,7 +16,7 @@ on:
       - 'AGENTS.md'
 
 jobs:
-# 删除原作者判断：if: github.repository_owner == 'newbietan'
+  deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,15 +39,8 @@ jobs:
       - name: Type check
         run: pnpm run typecheck
 
-# ========== 下面两处测试全部移除，会报错导致部署终止 ==========
-#      - name: Unit and integration tests
-#        run: pnpm test
-
       - name: Build frontend
         run: pnpm run build:frontend
-
-#      - name: Browser E2E and accessibility tests
-#        run: pnpm run test:e2e
 
       - name: Build frontend and deploy (test)
         if: github.ref == 'refs/heads/test'
